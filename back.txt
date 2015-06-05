@@ -1,0 +1,289 @@
+/* Serveur.c
+*/
+#include <stdio.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/shm.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#include "Fichier.ini"
+
+int idMsg;
+int idShm;
+
+TABWINDOW	*Tab;
+void AfficheTab();
+
+int main()
+{
+  int	rc,pid1 = 0 ,pid2 = 0, hd = 0, uExist = 0;
+  UTILISATEUR UserBuff;
+  char	BuffNomUtilisateur[20], BuffDonnee[255];
+  // Creation des resources
+
+  Tab = (TABWINDOW *)malloc(sizeof(TABWINDOW)*5);
+
+  if ((idMsg = msgget(KEY,IPC_CREAT|IPC_EXCL|0600)) == -1)
+  { 
+    if ((idMsg = msgget(KEY,0)) == -1)
+      exit(1);
+  }
+
+  MESSAGE	M, NewUser;
+  char	B[80];
+  int	i,j,k;
+
+  while(1)
+  {
+	  if( msgrcv(idMsg,&M,sizeof(M) - sizeof(long),1,0) == -1 )
+	  {
+	  	perror("Erreur:");
+	  	exit(0);
+	  }
+
+		switch(M.Requete)
+		{ 
+			case NEWWINDOW:
+				printf("Une fenetre vient de se connecter. (PID:%d) \n", M.idPid);
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(Tab[i].Pid == 0)
+					{
+						Tab[i].Pid = M.idPid;
+						i = 5;
+					}
+				}
+				AfficheTab();
+			break;
+
+			case LOGIN:
+				uExist = 0;
+
+				// Recherche si le client est deja connecte ou non
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(strcmp(Tab[i].NomUtilisateur, M.Donnee) == 0)
+					{
+						uExist = 1;
+					}
+				}
+				// Si client n'est pas connecte on va alors le chercher dans le fichier user
+				if(uExist == 0)
+				{
+					if ((hd = open(USERS,O_RDONLY)) == -1)
+					{ 
+						perror("Erreur de FIOuverture()");
+						exit(1);
+					}
+
+					while(read(hd, &UserBuff, sizeof(UTILISATEUR)) && uExist == 0)
+					{
+						if(strcmp(UserBuff.NomUtilisateur, M.Donnee) == 0)
+						{
+							for(i = 0 ; i < 5 ; i++)
+							{
+								if(Tab[i].Pid == M.idPid)
+								{
+									uExist = 1;
+									strcpy(Tab[i].NomUtilisateur, M.Donnee);
+									i = 5;
+								}
+							}
+						}
+					}
+					close(hd);
+
+					if(uExist == 0)
+						printf("Utilisateur non trouve\n");
+					else
+					{
+						printf("Utilisateur trouve\n");
+
+						//On prépare déjà la nouvelle structure pour pouvoir envoyer au user qui vient de se co, à tous les 
+						//autres users déjà connecté.
+						NewUser.Type = M.idPid;
+						NewUser.Requete = LOGIN;
+
+						// On informe tous les autres clients que quelqu'un vient de se connecter
+						for( i = 0 ; i < 5 ; i++)
+						{
+							if(Tab[i].Pid =! M.idPid && Tab[i].Pid != 0 && strcmp(Tab[i].NomUtilisateur, "") != 0)
+							{
+								M.Type = Tab[i].Pid;
+
+								if (msgsnd(idMsg, &M, sizeof(MESSAGE) - sizeof(long), 0) == -1)
+								{
+									perror("Erreur:");
+									exit(0);
+								}
+
+								// On en profite pour envoyer l'utilisateur trouvé au user qui vient de se log
+								strcpy(NewUser.Donnee, Tab[i].NomUtilisateur);
+								if (msgsnd(idMsg, &NewUser, sizeof(MESSAGE) - sizeof(long), 0) == -1)
+								{
+									perror("Erreur:");
+									exit(0);
+								}
+
+								kill(M.Type, SIGUSR1);
+							}
+						}	
+					}
+					
+
+				}
+				else
+					printf("Utilisateur deja existant\n");
+
+				AfficheTab();
+			break;
+
+			case ENDWINDOW:
+				printf("Une fenetre vient de se deconnecter. (PID:%d) \n", M.idPid);
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(Tab[i].Pid == M.idPid)
+					{
+						Tab[i].Pid = 0;
+						strcpy(Tab[i].NomUtilisateur, "");
+
+						for(j = 0 ; j < 5 ; j++)
+							Tab[i].Autre[j] = 0;
+
+						i = 5;
+					}
+				}
+				AfficheTab();
+			break;
+
+			case TERMINER:
+				printf("Un utilisateur vient de se deconnecter (USER: %s) \n", M.Donnee);
+
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(Tab[i].Pid == M.idPid)
+					{
+						strcpy(Tab[i].NomUtilisateur, "");
+						
+						for(j = 0 ; j < 5 ; j++)
+							Tab[i].Autre[j] = 0;
+
+						i = 5;
+					}
+				}
+				AfficheTab();
+			break;
+
+			case RECHERCHER:
+			break;
+
+			case ANNULER:
+			break;
+
+			case MODIFIER:
+			break;
+
+			case ENVOYER:
+				//Verification si le client est loggé
+				uExist = 0;
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(Tab[i].Pid == M.idPid)
+					{	
+						if(strcmp(Tab[i].NomUtilisateur, "") != 0)
+						{
+							uExist = 1;
+							strcpy(BuffNomUtilisateur, Tab[i].NomUtilisateur);
+						}
+					}
+				}
+				if (uExist == 1)
+				{
+					M.idPid = getpid();
+					sprintf(BuffDonnee, "(%s) %s \n",BuffNomUtilisateur, M.Donnee);
+					strcpy(M.Donnee, BuffDonnee);
+
+					// Envoi du message au client que le user a accepter
+					for(i = 0 ; i < 5 ; i++)
+					{
+						if(Tab[i].Pid == M.idPid)
+						{
+							M.idPid = getpid();
+							i = 5;
+							for(j = 0 ; j < 5 ; j++)
+							{
+								if(Tab[i].Autre[j] != 0)
+								{
+									M.Type = Tab[i].Autre[j];
+									msgsnd(idMsg, &M, sizeof(MESSAGE) - sizeof(long), 0);
+									kill(M.Type, SIGUSR1);
+								}
+							}
+						}
+					}
+				}
+				//Il n'est pas connecte!
+				else
+				{
+					printf("Impossible d'envoyer le message, pas connecte. (PID:%d) \n", M.idPid);
+
+					M.Type = M.idPid;
+					M.idPid = getpid();
+					strcpy(M.Donnee, "Vous n'etes pas actuellement connecte \n");
+
+					msgsnd(idMsg, &M, sizeof(MESSAGE) - sizeof(long), 0);
+					kill(M.Type, SIGUSR1);
+				}
+			break;
+
+			case ACCEPTER:
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(strcmp(Tab[i].NomUtilisateur, M.Donnee) == 0)
+					{
+						k = Tab[i].Pid; // k est le pid du client accepté
+						i = 5;
+					}
+				}
+				for(i = 0 ; i < 5 ; i++)
+				{
+					if(Tab[i].Pid == M.idPid)
+					{
+						for( j = 0 ; j < 5 ; j++)
+						{
+							if(Tab[i].Autre[j] != 0)
+							{
+								Tab[i].Autre[j] = k;
+								j = 5;
+							}
+						}
+						i = 5;
+					}
+				}
+			break;
+
+			case REFUSER:
+			break;
+		}
+  }
+}
+
+
+void AfficheTab()
+{
+  int i = 0;
+  while (i < 5) 
+     { printf("%5d --%-10s-- %5d %5d %5d %5d %5d\n",
+           Tab[i].Pid,Tab[i].NomUtilisateur,
+           Tab[i].Autre[0],Tab[i].Autre[1],Tab[i].Autre[2],
+           Tab[i].Autre[3],Tab[i].Autre[4]);
+       i++;
+     }
+  return ;
+}
